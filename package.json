@@ -1,0 +1,72 @@
+{
+  "name": "slidev-addon-blackboard",
+  "version": "0.1.0",
+  "description": "A Slidev addon for presenter blackboard overlays, exhibits, and print/export workflows.",
+  "type": "module",
+  "author": "Mario Milone",
+  "license": "MIT",
+  "homepage": "https://github.com/milonemario/slidev-addon-blackboard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/milonemario/slidev-addon-blackboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/milonemario/slidev-addon-blackboard/issues"
+  },
+  "keywords": [
+    "slidev",
+    "slidev-addon",
+    "blackboard",
+    "whiteboard",
+    "presenter",
+    "drawings"
+  ],
+  "engines": {
+    "slidev": ">=52.0.0"
+  },
+  "files": [
+    "components",
+    "composables",
+    "custom-nav-controls.vue",
+    "global-top.vue",
+    "pages",
+    "shared",
+    "setup",
+    "styles"
+  ],
+  "scripts": {
+    "check:pack": "npm --cache /tmp/teaching-npm-cache pack --dry-run",
+    "pack:dry-run": "npm run check:pack",
+    "prepublishOnly": "npm run check:pack"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "drauu": "^1.0.0",
+    "lz-string": "^1.5.0",
+    "markdown-it": "^14.1.0"
+  },
+  "peerDependencies": {
+    "@slidev/cli": ">=52.0.0",
+    "@slidev/client": ">=52.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@slidev/cli": {
+      "optional": true
+    },
+    "@slidev/client": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@slidev/cli": "52.14.2",
+    "@slidev/client": "52.14.2",
+    "@slidev/types": "52.14.2",
+    "@types/node": "22.19.17",
+    "typescript": "5.9.3",
+    "vite": "7.3.2",
+    "vue": "3.5.33",
+    "vue-router": "5.0.6"
+  }
+}
