@@ -27,6 +27,7 @@ import { listExhibits, loadExhibit, loadImageExhibitAsset, publicExhibitMetadata
 import {
   activateBoardSet,
   boardSetRootDir,
+  deleteBoardSet,
   isSafeBoardSetId,
   listBoardSets,
   loadBoardSetState,
@@ -266,6 +267,30 @@ function createBlackboardVitePlugin(options: BlackboardSetupOptions): Plugin {
           catch (error) {
             console.error('[blackboard] Failed to save blackboard set', error)
             writeError(res, 500, 'Failed to save blackboard set')
+          }
+          return
+        }
+
+        if (pathname === BLACKBOARD_BOARD_SETS_ENDPOINT && req.method === 'DELETE') {
+          try {
+            const key = requestUrl.searchParams.get('key')
+            const parsedKey = key ? parseBoardSetKey(key) : undefined
+            const kind = normalizeBoardSetKind(requestUrl.searchParams.get('kind') || parsedKey?.kind)
+            const id = requestUrl.searchParams.get('id') || parsedKey?.id || ''
+            if (!kind || kind === 'current-live' || !id)
+              return writeError(res, 400, 'Missing board set kind or id')
+
+            const deleted = await deleteBoardSet(kind, id, guideDir, prefilledLiveDir, savedLiveRootDir)
+            if (!deleted)
+              return writeError(res, 404, 'Blackboard set not found')
+
+            writeJson(res, {
+              sets: await listBoardSets(persistDir, guideDir, prefilledLiveDir, savedLiveRootDir),
+            })
+          }
+          catch (error) {
+            console.error('[blackboard] Failed to delete blackboard set', error)
+            writeError(res, 500, 'Failed to delete blackboard set')
           }
           return
         }

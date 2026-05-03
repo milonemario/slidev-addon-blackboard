@@ -48,6 +48,18 @@ export async function fetchBoardSets(endpoint: string) {
   return await getJson<BlackboardBoardSetListResponse>(endpoint)
 }
 
+export async function deleteBoardSet(endpoint: string, key: string) {
+  const params = new URLSearchParams({ key })
+  const response = await fetch(`${endpoint}?${params.toString()}`, {
+    method: 'DELETE',
+  })
+
+  if (!response.ok)
+    throw new Error(await response.text() || `Request failed with status ${response.status}`)
+
+  return await response.json() as BlackboardBoardSetListResponse
+}
+
 export async function saveBoardSet(
   endpoint: string,
   kind: Exclude<BlackboardBoardSetKind, 'current-live'>,

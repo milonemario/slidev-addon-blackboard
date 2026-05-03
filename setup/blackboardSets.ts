@@ -138,6 +138,13 @@ async function writeActiveBoardSetId(rootDir: string | undefined, id: string) {
   await fs.writeFile(path.join(rootDir, 'active.json'), JSON.stringify({ id }, null, 2), 'utf8')
 }
 
+async function clearActiveBoardSetId(rootDir: string | undefined) {
+  if (!rootDir)
+    return
+
+  await fs.unlink(path.join(rootDir, 'active.json')).catch(() => {})
+}
+
 async function uniqueBoardSetId(rootDir: string, name: string) {
   const base = boardSetIdFromName(name)
   let id = base
@@ -285,6 +292,38 @@ export async function activateBoardSet(
   savedLiveRootDir: string,
 ) {
   await writeActiveBoardSetId(boardSetRootDir(kind, guideRootDir, prefilledLiveDir, savedLiveRootDir), id)
+}
+
+export async function deleteBoardSet(
+  kind: Exclude<BlackboardBoardSetKind, 'current-live'>,
+  id: string,
+  guideRootDir: string | undefined,
+  prefilledLiveDir: string,
+  savedLiveRootDir: string,
+) {
+  if (!isSafeBoardSetId(id))
+    return false
+
+  const rootDir = boardSetRootDir(kind, guideRootDir, prefilledLiveDir, savedLiveRootDir)
+  if (!rootDir)
+    return false
+
+  const targetDir = path.join(rootDir, id)
+  if (!existsSync(targetDir))
+    return false
+
+  const activeId = await readActiveBoardSetId(rootDir)
+  await fs.rm(targetDir, { force: true, recursive: true })
+
+  if (activeId === id) {
+    const nextSet = (await listBoardSetKind(rootDir, kind))[0]
+    if (nextSet)
+      await writeActiveBoardSetId(rootDir, nextSet.id)
+    else
+      await clearActiveBoardSetId(rootDir)
+  }
+
+  return true
 }
 
 export async function resetLiveFromPrefilled(

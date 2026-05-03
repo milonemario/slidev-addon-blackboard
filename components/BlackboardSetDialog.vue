@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { useBlackboard } from '../composables/useBlackboard'
 
 type BlackboardSetKind = 'guide' | 'prefilled-live' | 'saved-live'
-type BlackboardSetDialogMode = 'save' | 'load' | 'reset'
+type BlackboardSetDialogMode = 'save' | 'load' | 'reset' | 'create-guide'
 type BlackboardSetTargetMode = 'existing' | 'new'
 
 const {
@@ -13,6 +13,8 @@ const {
   canEditGuides,
   canSaveGuides,
   canSavePrefilledLiveBoards,
+  createGuideSet,
+  deleteBlackboardSet,
   exportBlackboardSets,
   loadBlackboardSetIntoCurrentMode,
   loadExportBlackboardSets,
@@ -61,17 +63,16 @@ function setChoices(kind?: BlackboardSetKind) {
 }
 
 function setKindOptionsForMode(mode: BlackboardSetDialogMode): BlackboardSetKind[] {
+  if (mode === 'create-guide')
+    return ['guide']
   if (mode === 'reset')
     return ['prefilled-live']
   if (mode === 'save') {
     const kinds: BlackboardSetKind[] = []
-    if (blackboardEditMode.value === 'guide') {
-      if (canSaveGuides.value)
-        kinds.push('guide')
-    }
-    else if (canSavePrefilledLiveBoards.value) {
+    if (canSaveGuides.value)
+      kinds.push('guide')
+    if (blackboardEditMode.value !== 'guide' && canSavePrefilledLiveBoards.value)
       kinds.push('prefilled-live', 'saved-live')
-    }
     return kinds
   }
 
@@ -88,8 +89,10 @@ const setDialogSelectedSet = computed(() => (
   setDialogSets.value.find(set => set.key === setDialog.value.selectedKey)
 ))
 const setDialogTitle = computed(() => {
+  if (setDialog.value.mode === 'create-guide')
+    return 'Create Guides'
   if (setDialog.value.mode === 'save')
-    return blackboardEditMode.value === 'guide' ? 'Save Guides' : 'Save Live Blackboards'
+    return blackboardEditMode.value === 'guide' ? 'Save Guides' : 'Save Blackboard Set'
   if (setDialog.value.mode === 'reset')
     return 'Reset Live Blackboards'
 
@@ -98,6 +101,8 @@ const setDialogTitle = computed(() => {
 const setDialogPrimaryLabel = computed(() => {
   if (setDialog.value.busy)
     return 'Working'
+  if (setDialog.value.mode === 'create-guide')
+    return 'Create Guides'
   if (setDialog.value.mode === 'save')
     return 'Save'
   if (setDialog.value.mode === 'reset')
@@ -108,6 +113,8 @@ const setDialogPrimaryLabel = computed(() => {
 const setDialogCanSubmit = computed(() => {
   if (setDialog.value.busy)
     return false
+  if (setDialog.value.mode === 'create-guide')
+    return setDialog.value.newName.trim().length > 0
   if (setDialog.value.mode === 'save' && setDialog.value.targetMode === 'new')
     return setDialog.value.newName.trim().length > 0
 
@@ -115,10 +122,15 @@ const setDialogCanSubmit = computed(() => {
 })
 
 function defaultSetKind(mode: BlackboardSetDialogMode) {
+  if (mode === 'create-guide')
+    return 'guide'
   if (mode === 'reset')
     return 'prefilled-live'
   if (mode === 'save') {
-    return blackboardEditMode.value === 'guide' ? 'guide' : 'saved-live'
+    if (blackboardEditMode.value === 'guide' || !canSavePrefilledLiveBoards.value)
+      return 'guide'
+
+    return 'saved-live'
   }
 
   const preferred = blackboardEditMode.value === 'guide' ? 'guide' : 'saved-live'
@@ -163,9 +175,11 @@ async function open(mode: BlackboardSetDialogMode) {
     open: true,
     selectedKey: '',
     selectedKind: kind,
-    targetMode: mode === 'save' && !setChoices(kind).length ? 'new' : 'existing',
+    targetMode: (mode === 'create-guide' || (mode === 'save' && !setChoices(kind).length)) ? 'new' : 'existing',
   }
   selectDefaultSetForKind(kind)
+  if (mode === 'create-guide')
+    setDialog.value.targetMode = 'new'
 }
 
 function closeSetDialog() {
@@ -176,6 +190,28 @@ function closeSetDialog() {
   setDialog.value.error = ''
 }
 
+async function deleteSet(set: { id: string, key: string, name: string }) {
+  if (setDialog.value.busy)
+    return
+  if (typeof window !== 'undefined' && !window.confirm(`Delete "${set.name}"? This cannot be undone.`))
+    return
+
+  setDialog.value.busy = true
+  setDialog.value.error = ''
+  try {
+    const deleted = await deleteBlackboardSet(set.key)
+    if (!deleted) {
+      setDialog.value.error = 'Could not delete this blackboard set.'
+      return
+    }
+
+    selectDefaultSetForKind(setDialog.value.selectedKind)
+  }
+  finally {
+    setDialog.value.busy = false
+  }
+}
+
 async function submitSetDialog() {
   if (!setDialogCanSubmit.value)
     return
@@ -183,7 +219,14 @@ async function submitSetDialog() {
   setDialog.value.busy = true
   setDialog.value.error = ''
   try {
-    if (setDialog.value.mode === 'save') {
+    if (setDialog.value.mode === 'create-guide') {
+      const created = await createGuideSet({ name: setDialog.value.newName.trim() })
+      if (!created) {
+        setDialog.value.error = 'Could not create this guide set.'
+        return
+      }
+    }
+    else if (setDialog.value.mode === 'save') {
       const target = setDialog.value.targetMode === 'new'
         ? { name: setDialog.value.newName.trim() }
         : { id: setDialogSelectedSet.value?.id }
@@ -260,7 +303,7 @@ defineExpose({
         </header>
 
         <div class="slidev-blackboard-set-dialog__body">
-          <section class="slidev-blackboard-set-dialog__field">
+          <section v-if="setDialog.mode !== 'create-guide'" class="slidev-blackboard-set-dialog__field">
             <div class="slidev-blackboard-set-dialog__label">
               Type
             </div>
@@ -307,7 +350,7 @@ defineExpose({
           </section>
 
           <section
-            v-if="setDialog.mode !== 'save' || setDialog.targetMode === 'existing'"
+            v-if="setDialog.mode !== 'create-guide' && (setDialog.mode !== 'save' || setDialog.targetMode === 'existing')"
             class="slidev-blackboard-set-dialog__field"
           >
             <div class="slidev-blackboard-set-dialog__label">
@@ -317,20 +360,37 @@ defineExpose({
               v-if="setDialogSets.length"
               class="slidev-blackboard-set-dialog__set-list"
             >
-              <button
+              <div
                 v-for="set of setDialogSets"
                 :key="set.key"
-                type="button"
+                class="slidev-blackboard-set-dialog__set-row"
                 :class="{ active: setDialog.selectedKey === set.key }"
-                @click="setDialog.selectedKey = set.key"
               >
-                <span class="slidev-blackboard-set-dialog__set-name">
-                  {{ set.name }}
-                </span>
-                <span class="slidev-blackboard-set-dialog__set-meta">
-                  {{ set.boardCount }} boards<span v-if="set.active"> · active</span>
-                </span>
-              </button>
+                <button
+                  type="button"
+                  class="slidev-blackboard-set-dialog__set-select"
+                  :class="{ active: setDialog.selectedKey === set.key }"
+                  @click="setDialog.selectedKey = set.key"
+                >
+                  <span class="slidev-blackboard-set-dialog__set-name">
+                    {{ set.name }}
+                  </span>
+                  <span class="slidev-blackboard-set-dialog__set-meta">
+                    {{ set.boardCount }} boards<span v-if="set.active"> · active</span>
+                  </span>
+                </button>
+                <button
+                  v-if="setDialog.mode === 'save' && setDialog.targetMode === 'existing'"
+                  type="button"
+                  class="slidev-blackboard-set-dialog__trash-button"
+                  :title="`Delete ${set.name}`"
+                  :aria-label="`Delete ${set.name}`"
+                  :disabled="setDialog.busy"
+                  @click.stop="deleteSet(set)"
+                >
+                  <div class="i-carbon:trash-can" />
+                </button>
+              </div>
             </div>
             <p v-else class="slidev-blackboard-set-dialog__empty">
               No {{ setKindLabels[setDialog.selectedKind] }} versions are available.
@@ -338,10 +398,10 @@ defineExpose({
           </section>
 
           <label
-            v-if="setDialog.mode === 'save' && setDialog.targetMode === 'new'"
+            v-if="setDialog.mode === 'create-guide' || (setDialog.mode === 'save' && setDialog.targetMode === 'new')"
             class="slidev-blackboard-set-dialog__field"
           >
-            <span class="slidev-blackboard-set-dialog__label">New Version Name</span>
+            <span class="slidev-blackboard-set-dialog__label">{{ setDialog.mode === 'create-guide' ? 'Guide Set Name' : 'New Version Name' }}</span>
             <input
               v-model="setDialog.newName"
               class="slidev-blackboard-set-dialog__input"

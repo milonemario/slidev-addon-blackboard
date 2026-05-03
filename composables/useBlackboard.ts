@@ -34,6 +34,7 @@ import {
 import {
   fetchBoardSet,
   fetchBoardSets,
+  deleteBoardSet as deleteBoardSetFromApi,
   loadExhibitPayload as loadExhibitPayloadFromApi,
   postJson,
   resetLiveBoardSet,
@@ -156,11 +157,9 @@ function createBlackboard() {
       ? initialBoards
       : fallbackBoards
     const initialGuides = guidesEnabled
-      ? initialGuideBoards.length
-        ? initialGuideBoards
-        : [createBoard(1)]
+      ? initialGuideBoards
       : []
-    const alignedInitialBoards = guidesEnabled
+    const alignedInitialBoards = guidesEnabled && initialGuides.length
       ? alignBoardPairs(initialLiveBoards, initialGuides)
       : { liveBoards: initialLiveBoards, guideBoards: initialGuides }
 
@@ -324,9 +323,13 @@ function createBlackboard() {
     const canSaveGuides = computed(() => canEditGuides.value)
     const canSavePrefilledLiveBoards = computed(() => blackboardsEnabled && persistedBoardsEnabled && !isNotesViewer.value && !isPrintMode.value)
     const canShowExhibits = computed(() => blackboardsEnabled && isOpen.value && canEdit.value && !isPrintMode.value && exhibits.value.length > 0)
+    const hasGuideBoards = computed(() => guidesEnabled && guideBoards.value.length > 0)
     const activeGuideSetName = computed(() => {
       const activeSet = exportBlackboardSets.value.find(set => set.kind === 'guide' && set.id === activeGuideSetId.value)
         || exportBlackboardSets.value.find(set => set.kind === 'guide' && set.active)
+
+      if (!activeSet && !guideBoards.value.length)
+        return 'New guides'
 
       return activeSet?.name || boardSetFallbackName(activeGuideSetId.value)
     })
@@ -730,6 +733,38 @@ function createBlackboard() {
       exportBlackboardTheme.value = normalizeBoardTheme(theme)
     }
 
+    async function deleteBlackboardSet(key: string) {
+      const parsed = parseBoardSetKey(key)
+      if (!parsed || parsed.kind === 'current-live')
+        return false
+
+      try {
+        const response = await deleteBoardSetFromApi(boardSetsEndpoint, key)
+        exportBlackboardSets.value = response.sets || []
+
+        if (exportBlackboardSetId.value === key) {
+          exportBlackboardSetId.value = 'current'
+          exportBlackboardSetBoards.value = []
+        }
+
+        if (parsed.kind === 'guide' && activeGuideSetId.value === parsed.id) {
+          activeGuideSetId.value = exportBlackboardSets.value.find(set => set.kind === 'guide' && set.active)?.id || 'default'
+          guideBoards.value = []
+          activeGuideBoardId.value = ''
+          writeLocalGuideState()
+          blackboardEditMode.value = 'live'
+          load()
+        }
+
+        await loadExportBlackboardSet(exportBlackboardSetId.value)
+        return true
+      }
+      catch (error) {
+        console.warn('[blackboard] Failed to delete blackboard set', error)
+        return false
+      }
+    }
+
     async function saveCurrentBlackboardsToSet(
       kind: Exclude<BlackboardBoardSetKind, 'current-live'>,
       target: { id?: string, name?: string } = {},
@@ -760,6 +795,52 @@ function createBlackboard() {
       }
       catch (error) {
         console.warn('[blackboard] Failed to save blackboard set', error)
+        return undefined
+      }
+    }
+
+    async function createGuideSet(target: { name: string }) {
+      if (!canSaveGuides.value)
+        return undefined
+
+      save()
+
+      const guide = createBoard(1)
+      const currentLiveBoardId = activeLiveBoard.value?.id
+      const nextLiveBoards = liveBoardsWithCurrentDrawing().map(board => (
+        board.id === currentLiveBoardId
+          ? { ...board, guideBoardId: guide.id }
+          : board
+      ))
+
+      try {
+        const response = await saveBoardSet(boardSetsEndpoint, 'guide', { name: target.name }, {
+          activeBoardId: guide.id,
+          boards: [guide],
+        })
+        exportBlackboardSets.value = response.sets || exportBlackboardSets.value
+        if (!response.id)
+          return undefined
+
+        activeGuideSetId.value = response.id
+        const savedBoards = cloneBoards(response.state?.boards)
+        const nextGuides = savedBoards.length ? savedBoards : [guide]
+        const activeId = response.state?.activeBoardId || nextGuides[0]?.id || guide.id
+        const linkedLiveBoards = nextLiveBoards.map(board => (
+          board.id === currentLiveBoardId && activeId
+            ? { ...board, guideBoardId: activeId }
+            : board
+        ))
+
+        commitGuideBoards(nextGuides, activeId, { load: false, persist: false })
+        commitLiveBoards(linkedLiveBoards, activeBoardId.value, { persist: false, sync: true })
+        blackboardEditMode.value = 'guide'
+        load()
+        await loadExportBlackboardSets()
+        return response.set
+      }
+      catch (error) {
+        console.warn('[blackboard] Failed to create guide set', error)
         return undefined
       }
     }
@@ -1392,8 +1473,9 @@ function createBlackboard() {
     close,
     drauu,
     eraseExhibitsBetweenPoints,
-    displayBrushColor,
-    drawingData,
+      displayBrushColor,
+      deleteBlackboardSet,
+      drawingData,
     drawingMode,
     beginExhibitPlacement,
     exportBlackboardSetId,
@@ -1406,6 +1488,7 @@ function createBlackboard() {
       exhibits,
       guideBoards,
       guideOpacity,
+      hasGuideBoards,
       isDrawing,
       isAutomatedPrintExport,
       isOpen,
@@ -1433,6 +1516,7 @@ function createBlackboard() {
       removeBoard,
       resumeDrawingMode,
       resetLiveFromPrefilled,
+      createGuideSet,
       saveCurrentBlackboardsToSet,
       saveGuides,
       saveNamedLiveBoards,

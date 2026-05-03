@@ -6,7 +6,7 @@ import { useBlackboard } from '../composables/useBlackboard'
 import BlackboardSetDialog from './BlackboardSetDialog.vue'
 
 type ToolbarToolMode = 'stylus' | 'line' | 'arrow' | 'ellipse' | 'rectangle' | 'eraseLine'
-type BlackboardSetDialogMode = 'save' | 'load' | 'reset'
+type BlackboardSetDialogMode = 'save' | 'load' | 'reset' | 'create-guide'
 type BlackboardSetDialogHandle = {
   open: (mode: BlackboardSetDialogMode) => Promise<void>
 }
@@ -47,6 +47,7 @@ const {
   drawingMode,
   exhibitPickerVisible,
   guideOpacity,
+  hasGuideBoards,
   insertBoardAfter,
   insertBoardBefore,
   nextBoard,
@@ -96,13 +97,13 @@ const activeTool = computed(() => (
 const canSaveCurrentBoards = computed(() => (
   blackboardEditMode.value === 'guide'
     ? canSaveGuides.value
-    : canSavePrefilledLiveBoards.value
+    : canSaveGuides.value || canSavePrefilledLiveBoards.value
 ))
 
 const saveButtonTitle = computed(() => (
   blackboardEditMode.value === 'guide'
     ? 'Save blackboard guides'
-    : 'Save live blackboards'
+    : 'Save blackboard set'
 ))
 
 const removeButtonTitle = computed(() => (
@@ -297,6 +298,14 @@ function loadBlackboardSet() {
   openSetDialog('load')
 }
 
+function editGuides() {
+  closeMenus()
+  if (hasGuideBoards.value)
+    setBlackboardEditMode('guide')
+  else
+    void setDialog.value?.open('create-guide')
+}
+
 onMounted(() => {
   loadToolbarPosition()
 })
@@ -372,7 +381,7 @@ onMounted(() => {
           v-if="canEditGuides"
           :title="`Edit guides: ${activeGuideSetName}`"
           :class="['slidev-blackboard__guide-mode-button', blackboardEditMode === 'guide' ? 'active' : 'shallow']"
-          @click="setBlackboardEditMode('guide')"
+          @click="editGuides"
         >
           <div class="i-carbon:layers" />
           <span class="slidev-blackboard__guide-mode-label">{{ activeGuideSetName }}</span>

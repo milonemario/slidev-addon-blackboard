@@ -773,7 +773,8 @@
 }
 
 .slidev-blackboard-set-dialog__segmented button,
-.slidev-blackboard-set-dialog__set-list button,
+.slidev-blackboard-set-dialog__set-select,
+.slidev-blackboard-set-dialog__trash-button,
 .slidev-blackboard-set-dialog__button,
 .slidev-blackboard-set-dialog__icon-button {
   border: 1px solid var(--slidev-blackboard-control-border);
@@ -809,13 +810,30 @@
   overflow: auto;
 }
 
-.slidev-blackboard-set-dialog__set-list button {
+.slidev-blackboard-set-dialog__set-row {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.slidev-blackboard-set-dialog__set-select {
+  display: grid;
+  min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.5rem;
   align-items: center;
   padding: 0.55rem 0.65rem;
   text-align: left;
+}
+
+.slidev-blackboard-set-dialog__trash-button {
+  display: inline-grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  place-items: center;
+  padding: 0;
+  color: var(--slidev-blackboard-fg-muted);
 }
 
 .slidev-blackboard-set-dialog__set-name {
@@ -838,8 +856,8 @@
 
 .slidev-blackboard-set-dialog__segmented button:hover,
 .slidev-blackboard-set-dialog__segmented button.active,
-.slidev-blackboard-set-dialog__set-list button:hover,
-.slidev-blackboard-set-dialog__set-list button.active,
+.slidev-blackboard-set-dialog__set-select:hover,
+.slidev-blackboard-set-dialog__set-select.active,
 .slidev-blackboard-set-dialog__button:hover,
 .slidev-blackboard-set-dialog__button.is-primary,
 .slidev-blackboard-set-dialog__icon-button:hover {
@@ -848,8 +866,15 @@
   color: var(--slidev-blackboard-fg-strong);
 }
 
+.slidev-blackboard-set-dialog__trash-button:hover {
+  border-color: rgba(255, 135, 135, 0.5);
+  background: rgba(255, 135, 135, 0.12);
+  color: #ff8787;
+}
+
 .slidev-blackboard-set-dialog__segmented button:disabled,
 .slidev-blackboard-set-dialog__button:disabled,
+.slidev-blackboard-set-dialog__trash-button:disabled,
 .slidev-blackboard-set-dialog__icon-button:disabled {
   opacity: 0.46;
   pointer-events: none;
