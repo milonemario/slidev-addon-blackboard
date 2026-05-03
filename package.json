@@ -1,6 +1,6 @@
 {
   "name": "slidev-addon-blackboard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Slidev addon for presenter blackboard overlays, exhibits, and print/export workflows.",
   "type": "module",
   "author": "Mario Milone",
