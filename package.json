@@ -30,6 +30,7 @@
     "custom-nav-controls.vue",
     "global-top.vue",
     "pages",
+    "scripts",
     "shared",
     "setup",
     "styles"
@@ -37,6 +38,7 @@
   "scripts": {
     "check:pack": "npm --cache /tmp/teaching-npm-cache pack --dry-run",
     "pack:dry-run": "npm run check:pack",
+    "profile:sync": "node scripts/profile-sync.mjs",
     "prepublishOnly": "npm run check:pack"
   },
   "publishConfig": {

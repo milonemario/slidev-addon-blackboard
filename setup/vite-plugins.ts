@@ -101,6 +101,7 @@ async function readBodyJson(req: IncomingMessage) {
 
 function writeJson(res: ServerResponse, value: unknown) {
   res.statusCode = 200
+  res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Content-Type', 'application/json')
   res.end(JSON.stringify(value))
 }

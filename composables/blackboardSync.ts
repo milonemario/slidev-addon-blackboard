@@ -3,9 +3,21 @@ import type { BlackboardBoard, BlackboardBoardTheme } from '../shared/blackboard
 
 export type SyncType = 'presenter' | 'viewer'
 
+export type BlackboardBoardSyncOperation =
+  | {
+    type: 'upsert'
+    board: BlackboardBoard
+    index: number
+  }
+  | {
+    type: 'remove'
+    boardId: string
+  }
+
 export interface BlackboardSyncState {
   activeBoardId?: string
   activeDrawing?: string
+  boardOperation?: BlackboardBoardSyncOperation
   boardTheme?: BlackboardBoardTheme
   boards?: BlackboardBoard[]
   open?: boolean

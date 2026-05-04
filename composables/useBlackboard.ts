@@ -107,6 +107,7 @@ const buildAppendixOptions = initialState.build || {
 }
 const blackboardDrawingInputTypes: NonNullable<DrauuOptions['acceptsInputTypes']> = ['mouse', 'pen']
 const noBlackboardInputTypes: NonNullable<DrauuOptions['acceptsInputTypes']> = []
+const drawingSyncInterval = 33
 
 function alertAction(message: string) {
   if (typeof window !== 'undefined')
@@ -231,6 +232,9 @@ function createBlackboard() {
     let openSyncCleanupTimer: ReturnType<typeof setTimeout> | undefined
     let persistTimer: ReturnType<typeof setTimeout> | undefined
     let guidePersistTimer: ReturnType<typeof setTimeout> | undefined
+    let drawingSyncTimer: ReturnType<typeof setTimeout> | undefined
+    let pendingDrawingSync: string | undefined
+    let lastDrawingSyncSentAt = 0
     let releaseShortcutLock: (() => void) | undefined
     let keydownHandler: ((event: KeyboardEvent) => void) | undefined
 
@@ -445,16 +449,70 @@ function createBlackboard() {
     patchServerBlackboardRef(serverState, patch)
   }
 
+  function sendDrawingSyncState(drawing: string) {
+    if (!shouldSendSyncCommand())
+      return
+
+    const id = createSyncId(clientId, 'state')
+    const now = Date.now()
+    lastSentStateId = id
+    lastDrawingSyncSentAt = now
+    patchServerBlackboard({
+      activeBoardId: activeBoardId.value,
+      activeDrawing: drawing,
+      boardOperation: undefined,
+      boardTheme: boardTheme.value,
+      boards: undefined,
+      stateId: id,
+      stateSource: syncType.value,
+      stateTime: now,
+    })
+  }
+
+  function flushDrawingSyncState() {
+    if (drawingSyncTimer)
+      clearTimeout(drawingSyncTimer)
+    drawingSyncTimer = undefined
+
+    const drawing = pendingDrawingSync
+    pendingDrawingSync = undefined
+    if (drawing != null)
+      sendDrawingSyncState(drawing)
+  }
+
+  function scheduleDrawingSyncState(drawing: string) {
+    pendingDrawingSync = drawing
+    if (!shouldSendSyncCommand())
+      return
+
+    const elapsed = Date.now() - lastDrawingSyncSentAt
+    if (elapsed >= drawingSyncInterval) {
+      flushDrawingSyncState()
+      return
+    }
+
+    if (!drawingSyncTimer) {
+      drawingSyncTimer = setTimeout(() => {
+        flushDrawingSyncState()
+      }, Math.max(0, drawingSyncInterval - elapsed))
+    }
+  }
+
     function syncBoardState() {
       if (!shouldSendSyncCommand())
         return
 
+      if (drawingSyncTimer)
+        clearTimeout(drawingSyncTimer)
+      drawingSyncTimer = undefined
+      pendingDrawingSync = undefined
       const id = createSyncId(clientId, 'state')
       const currentBoards = liveBoardsWithCurrentDrawing()
       lastSentStateId = id
       patchServerBlackboard({
         activeBoardId: activeBoardId.value,
         activeDrawing: editMode.value === 'live' && drauu.mounted ? currentDrauuDrawing(drauu) : activeLiveBoard.value?.drawing || '',
+        boardOperation: undefined,
         boardTheme: boardTheme.value,
         boards: cloneBoards(currentBoards),
         stateId: id,
@@ -486,6 +544,30 @@ function createBlackboard() {
         persistLiveBoardState()
       if (options.sync)
         syncBoardState()
+    }
+
+    function syncLiveBoardOperation(operation: BlackboardSyncState['boardOperation'], nextActiveBoardId: string) {
+      if (!operation || !shouldSendSyncCommand())
+        return
+
+      if (drawingSyncTimer)
+        clearTimeout(drawingSyncTimer)
+      drawingSyncTimer = undefined
+      pendingDrawingSync = undefined
+
+      const active = boards.value.find(board => board.id === nextActiveBoardId) || boards.value[0]
+      const id = createSyncId(clientId, 'state')
+      lastSentStateId = id
+      patchServerBlackboard({
+        activeBoardId: active?.id || nextActiveBoardId,
+        activeDrawing: undefined,
+        boardOperation: operation,
+        boardTheme: boardTheme.value,
+        boards: undefined,
+        stateId: id,
+        stateSource: syncType.value,
+        stateTime: Date.now(),
+      })
     }
 
     function commitGuideBoards(
@@ -539,8 +621,10 @@ function createBlackboard() {
           ? { ...board, drawing, updatedAt: now }
           : board),
         activeBoardIdForMode(mode),
-        { persist: true, sync: mode === 'live' },
+        { persist: true },
       )
+      if (mode === 'live')
+        scheduleDrawingSyncState(drawing)
     }
 
     function boardsWithCurrentDrawing(mode = editMode.value) {
@@ -683,6 +767,56 @@ function createBlackboard() {
         throw new Error('Invalid blackboard set')
 
       return await fetchBoardSet(boardSetsEndpoint, key, activate)
+    }
+
+    async function refreshPersistedBoardsFromServer() {
+      if (!blackboardsEnabled || typeof window === 'undefined' || isNotesViewer.value || isPrintMode.value)
+        return
+
+      try {
+        const response = await fetchBoardSets(boardSetsEndpoint)
+        exportBlackboardSets.value = response.sets || []
+
+        if (persistedBoardsEnabled) {
+          const liveState = await fetchBoardSet(boardSetsEndpoint, 'current')
+          const nextLiveBoards = cloneBoards(liveState.boards)
+          if (liveState.theme)
+            boardTheme.value = normalizeBoardTheme(liveState.theme)
+          const aligned = guidesEnabled && nextLiveBoards.length
+            ? alignBoardPairs(nextLiveBoards, guideBoards.value)
+            : { liveBoards: nextLiveBoards.length ? nextLiveBoards : [createBoard(1)], guideBoards: guideBoards.value }
+          if (guidesEnabled)
+            commitGuideBoards(aligned.guideBoards, activeGuideBoardId.value, { load: editMode.value === 'guide', persist: false })
+          commitLiveBoards(aligned.liveBoards, liveState.activeBoardId, { load: editMode.value === 'live', persist: false, sync: true })
+        }
+
+        if (guidesEnabled) {
+          const activeGuideSet = exportBlackboardSets.value.find(set => set.kind === 'guide' && set.active)
+          if (activeGuideSet) {
+            const guideState = await fetchBoardSet(boardSetsEndpoint, activeGuideSet.key)
+            const nextGuideBoards = cloneBoards(guideState.boards)
+            if (nextGuideBoards.length) {
+              activeGuideSetId.value = activeGuideSet.id
+              const aligned = alignBoardPairs(boards.value, nextGuideBoards)
+              commitGuideBoards(aligned.guideBoards, guideState.activeBoardId, { load: editMode.value === 'guide', persist: false })
+              commitLiveBoards(aligned.liveBoards, activeBoardId.value, { persist: false, sync: true })
+            }
+          }
+          else {
+            activeGuideSetId.value = 'default'
+            guideBoards.value = []
+            activeGuideBoardId.value = ''
+            writeLocalGuideState()
+          }
+        }
+
+        if (!exportBlackboardSets.value.some(set => set.key === exportBlackboardSetId.value))
+          exportBlackboardSetId.value = 'current'
+        await loadExportBlackboardSet(exportBlackboardSetId.value)
+      }
+      catch (error) {
+        console.warn('[blackboard] Failed to refresh persisted blackboards', error)
+      }
     }
 
     async function loadExportBlackboardSet(key = exportBlackboardSetId.value) {
@@ -965,7 +1099,12 @@ function createBlackboard() {
 
       if (guidesEnabled)
         commitGuideBoards(nextGuideBoards, guide.id, { load: mode === 'guide', persist: true })
-      commitLiveBoards(nextLiveBoards, liveBoard.id, { load: mode === 'live', persist: true, sync: true })
+      commitLiveBoards(nextLiveBoards, liveBoard.id, { load: mode === 'live', persist: true })
+      syncLiveBoardOperation({
+        board: liveBoard,
+        index: insertIndex,
+        type: 'upsert',
+      }, liveBoard.id)
     }
 
   function insertBoardBefore() {
@@ -1016,8 +1155,15 @@ function createBlackboard() {
 
       if (guidesEnabled && (guideIndex >= 0 || guideBoards.value.length))
         commitGuideBoards(nextGuideBoards, nextActiveGuideBoardId, { load: mode === 'guide', persist: true })
-      if (liveIndex >= 0 || boards.value.length)
-        commitLiveBoards(nextLiveBoards, nextActiveLiveBoardId, { load: mode === 'live', persist: true, sync: true })
+      if (liveIndex >= 0 || boards.value.length) {
+        commitLiveBoards(nextLiveBoards, nextActiveLiveBoardId, { load: mode === 'live', persist: true })
+        if (liveBoard) {
+          syncLiveBoardOperation({
+            boardId: liveBoard.id,
+            type: 'remove',
+          }, nextActiveLiveBoardId)
+        }
+      }
     }
 
     function selectBoard(id: string) {
@@ -1214,6 +1360,7 @@ function createBlackboard() {
       open,
       openSource: syncType.value,
       openTime: Date.now(),
+      boardOperation: undefined,
     }
 
       if (open) {
@@ -1254,11 +1401,55 @@ function createBlackboard() {
       boardTheme.value = next
   }
 
+  function applySyncedBoardOperation(state: BlackboardSyncState) {
+    const operation = state.boardOperation
+    if (!operation)
+      return false
+
+    if (operation.type === 'upsert') {
+      const board = cloneBoards([operation.board])[0]
+      if (!board)
+        return false
+
+      const withoutExisting = boards.value.filter(existing => existing.id !== board.id)
+      const index = Math.max(0, Math.min(operation.index, withoutExisting.length))
+      const nextBoards = [
+        ...withoutExisting.slice(0, index),
+        board,
+        ...withoutExisting.slice(index),
+      ]
+      commitLiveBoards(nextBoards, state.activeBoardId || board.id, { load: editMode.value === 'live' })
+      return true
+    }
+
+    const nextBoards = boards.value.filter(board => board.id !== operation.boardId)
+    if (nextBoards.length === boards.value.length)
+      return false
+
+    commitLiveBoards(nextBoards, state.activeBoardId || nextBoards[0]?.id, { load: editMode.value === 'live' })
+    return true
+  }
+
   function applySyncedBoards(state: BlackboardSyncState) {
     applySyncedBoardTheme(state)
 
-      if (!state.boards?.length)
+      if (applySyncedBoardOperation(state))
         return
+
+      if (!state.boards?.length) {
+        if (typeof state.activeDrawing !== 'string' || !state.activeBoardId)
+          return
+
+        const nextBoards = boards.value.map(board => board.id === state.activeBoardId
+          ? { ...board, drawing: state.activeDrawing || '', updatedAt: Date.now() }
+          : board)
+
+        if (!nextBoards.some(board => board.id === state.activeBoardId))
+          return
+
+        commitLiveBoards(nextBoards, state.activeBoardId, { load: editMode.value === 'live' })
+        return
+      }
 
       commitLiveBoards(state.boards, state.activeBoardId, { load: true })
     }
@@ -1305,7 +1496,10 @@ function createBlackboard() {
 
   drauu.on('changed', save)
   drauu.on('start', () => isDrawing.value = true)
-  drauu.on('end', () => isDrawing.value = false)
+  drauu.on('end', () => {
+    isDrawing.value = false
+    flushDrawingSyncState()
+  })
 
   watch(drawingMode, applyDrawingMode, { immediate: true })
 
@@ -1411,9 +1605,13 @@ function createBlackboard() {
       clearTimeout(persistTimer)
     if (guidePersistTimer)
       clearTimeout(guidePersistTimer)
+    if (drawingSyncTimer)
+      clearTimeout(drawingSyncTimer)
     openSyncCleanupTimer = undefined
     persistTimer = undefined
     guidePersistTimer = undefined
+    drawingSyncTimer = undefined
+    pendingDrawingSync = undefined
 
     if (releaseShortcutLock) {
       releaseShortcutLock()
@@ -1428,7 +1626,7 @@ function createBlackboard() {
 
   if (typeof window !== 'undefined') {
     if (blackboardsEnabled)
-      void loadExportBlackboardSets()
+      void refreshPersistedBoardsFromServer().then(loadExportBlackboardSets)
 
     keydownHandler = handleBlackboardShortcut
     window.addEventListener('keydown', keydownHandler, false)

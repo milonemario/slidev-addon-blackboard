@@ -15,6 +15,7 @@ import { renderSvgExhibit } from './svgFileExhibits'
 
 export async function postJson<T>(url: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
+    cache: 'no-store',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -29,7 +30,9 @@ export async function postJson<T>(url: string, body?: unknown): Promise<T> {
 }
 
 export async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url)
+  const response = await fetch(url, {
+    cache: 'no-store',
+  })
 
   if (!response.ok)
     throw new Error(await response.text() || `Request failed with status ${response.status}`)
