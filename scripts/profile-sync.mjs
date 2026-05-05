@@ -1,10 +1,12 @@
 import { gzipSync } from 'node:zlib'
 import { performance } from 'node:perf_hooks'
 
+const elementIdAttribute = 'data-blackboard-element-id'
+
 function makeStroke(index) {
   const x = 80 + (index % 80) * 12
   const y = 90 + Math.floor(index / 80) * 12
-  return `<path d="M${x} ${y} C${x + 8} ${y - 6},${x + 16} ${y + 6},${x + 24} ${y}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`
+  return `<path ${elementIdAttribute}="bbe-${index}" d="M${x} ${y} C${x + 8} ${y - 6},${x + 16} ${y + 6},${x + 24} ${y}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`
 }
 
 function makeDrawing(strokes) {
@@ -19,6 +21,32 @@ function makeBoard(index, strokes = 0) {
     createdAt: now,
     updatedAt: now,
     drawing: makeDrawing(strokes),
+  }
+}
+
+function basePayload(activeBoardId, label) {
+  return {
+    activeBoardId,
+    boardTheme: 'blackboard',
+    stateId: `profile-${label}`,
+    stateSource: 'presenter',
+    stateTime: Date.now(),
+    syncClientId: 'profile-client',
+    syncSeq: 1,
+  }
+}
+
+function drawingPayload(activeBoard, operation, label) {
+  return {
+    ...basePayload(activeBoard.id, label),
+    drawingOperation: operation,
+  }
+}
+
+function boardPayload(activeBoard, operation, label) {
+  return {
+    ...basePayload(activeBoard.id, label),
+    boardOperation: operation,
   }
 }
 
@@ -38,9 +66,7 @@ function payloadMetrics(payload, iterations) {
     bytes: Buffer.byteLength(json),
     gzipBytes: gzipSync(json).byteLength,
     iterations,
-    parseMs,
     parsePerOpMs: parseMs / iterations,
-    stringifyMs,
     stringifyPerOpMs: stringifyMs / iterations,
   }
 }
@@ -55,31 +81,6 @@ function formatBytes(bytes) {
 
 function formatMs(ms) {
   return `${ms.toFixed(2)} ms`
-}
-
-function makeStrokePayload(activeBoard, label) {
-  return {
-    activeBoardId: activeBoard.id,
-    activeDrawing: `${activeBoard.drawing}${activeBoard.drawing ? '\n' : ''}${makeStroke(999_999)}`,
-    boardTheme: 'blackboard',
-    boards: undefined,
-    stateId: `profile-${label}`,
-    stateSource: 'presenter',
-    stateTime: Date.now(),
-  }
-}
-
-function makeBoardOperationPayload(activeBoard, operation, label) {
-  return {
-    activeBoardId: activeBoard.id,
-    activeDrawing: undefined,
-    boardOperation: operation,
-    boardTheme: 'blackboard',
-    boards: undefined,
-    stateId: `profile-${label}`,
-    stateSource: 'presenter',
-    stateTime: Date.now(),
-  }
 }
 
 function summarizeMetric(metric) {
@@ -97,37 +98,87 @@ function summarizeMetric(metric) {
 function runScenario({ boards, strokesPerBoard, iterations }) {
   const boardList = Array.from({ length: boards }, (_, index) => makeBoard(index, strokesPerBoard))
   const activeBoard = boardList[0]
+  const finalStroke = makeStroke(999_999)
   const addedBoard = makeBoard(boards, 0)
-  const removeActiveBoard = boardList[boards > 1 ? 1 : 0]
+  const restoredElement = makeStroke(888_888)
+  const previewStroke = makeStroke(777_777).replace(`${elementIdAttribute}="bbe-777777"`, 'data-blackboard-preview-id="preview-777777"')
 
-  const stroke = payloadMetrics(makeStrokePayload(activeBoard, 'stroke'), iterations)
-  const add = payloadMetrics(makeBoardOperationPayload(addedBoard, {
+  const livePreview = payloadMetrics(drawingPayload(activeBoard, {
+    elementSvg: previewStroke,
+    index: strokesPerBoard,
+    previewId: 'preview-777777',
+    type: 'previewElement',
+  }, 'live-preview'), iterations)
+
+  const finalStrokeUpsert = payloadMetrics(drawingPayload(activeBoard, {
+    elementId: 'bbe-999999',
+    elementSvg: finalStroke,
+    index: strokesPerBoard,
+    previewId: 'preview-777777',
+    type: 'upsertElement',
+  }, 'final-stroke'), iterations)
+
+  const eraser1 = payloadMetrics(drawingPayload(activeBoard, {
+    elementIds: ['bbe-1'],
+    type: 'removeElements',
+  }, 'eraser-1'), iterations)
+
+  const eraser5 = payloadMetrics(drawingPayload(activeBoard, {
+    elementIds: Array.from({ length: 5 }, (_, index) => `bbe-${index + 1}`),
+    type: 'removeElements',
+  }, 'eraser-5'), iterations)
+
+  const eraser20 = payloadMetrics(drawingPayload(activeBoard, {
+    elementIds: Array.from({ length: 20 }, (_, index) => `bbe-${index + 1}`),
+    type: 'removeElements',
+  }, 'eraser-20'), iterations)
+
+  const undoRemove = eraser1
+  const redoRestore = payloadMetrics(drawingPayload(activeBoard, {
+    elementId: 'bbe-888888',
+    elementSvg: restoredElement,
+    index: Math.max(0, strokesPerBoard - 1),
+    type: 'upsertElement',
+  }, 'redo-restore'), iterations)
+
+  const fallbackReplace = payloadMetrics(drawingPayload(activeBoard, {
+    drawing: activeBoard.drawing,
+    type: 'replaceDrawing',
+  }, 'replace-drawing'), iterations)
+
+  const addBoard = payloadMetrics(boardPayload(addedBoard, {
     board: addedBoard,
     index: boards,
     type: 'upsert',
   }, 'add-board'), iterations)
-  const remove = boards > 1
-    ? payloadMetrics(makeBoardOperationPayload(removeActiveBoard, {
+
+  const removeBoard = boards > 1
+    ? payloadMetrics(boardPayload(boardList[1], {
         boardId: activeBoard.id,
         type: 'remove',
       }, 'remove-board'), iterations)
     : undefined
 
   return {
+    addBoard,
     boards,
-    strokesPerBoard,
+    eraser1,
+    eraser5,
+    eraser20,
+    fallbackReplace,
+    finalStrokeUpsert,
     iterations,
-    stroke,
-    add,
-    remove,
+    livePreview,
+    redoRestore,
+    removeBoard,
+    strokesPerBoard,
+    undoRemove,
   }
 }
 
 const scenarios = [
-  { boards: 1, strokesPerBoard: 25, iterations: 200 },
   { boards: 1, strokesPerBoard: 100, iterations: 200 },
   { boards: 10, strokesPerBoard: 100, iterations: 50 },
-  { boards: 25, strokesPerBoard: 100, iterations: 20 },
   { boards: 50, strokesPerBoard: 100, iterations: 10 },
   { boards: 100, strokesPerBoard: 100, iterations: 5 },
   { boards: 100, strokesPerBoard: 250, iterations: 5 },
@@ -135,13 +186,19 @@ const scenarios = [
 ]
 
 console.log('Slidev blackboard sync payload profile')
-console.log('Current protocol profile: extra stroke is active-board-only; add/remove boards are incremental operations.\n')
+console.log('Current protocol profile: drawing element deltas, fallback active-board replacement, and board operations.\n')
 
 for (const result of scenarios.map(runScenario)) {
-  console.log(`${result.boards} board(s), ${result.strokesPerBoard} strokes/board (${result.iterations}x timing loop)`)
-  console.log(`  extra stroke: ${summarizeMetric(result.stroke)}`)
-  console.log(`  add board:    ${summarizeMetric(result.add)}`)
-  console.log(`  remove board: ${summarizeMetric(result.remove)}`)
-  console.log(`  add/stroke raw ratio:    ${(result.add.bytes / result.stroke.bytes).toFixed(1)}x`)
-  console.log(`  remove/stroke raw ratio: ${result.remove ? `${(result.remove.bytes / result.stroke.bytes).toFixed(1)}x` : 'n/a'}\n`)
+  console.log(`${result.boards} board(s), ${result.strokesPerBoard} strokes on active board (${result.iterations}x timing loop)`)
+  console.log(`  live preview:        ${summarizeMetric(result.livePreview)}`)
+  console.log(`  final stroke upsert: ${summarizeMetric(result.finalStrokeUpsert)}`)
+  console.log(`  eraser remove 1:     ${summarizeMetric(result.eraser1)}`)
+  console.log(`  eraser remove 5:     ${summarizeMetric(result.eraser5)}`)
+  console.log(`  eraser remove 20:    ${summarizeMetric(result.eraser20)}`)
+  console.log(`  undo remove:         ${summarizeMetric(result.undoRemove)}`)
+  console.log(`  redo restore:        ${summarizeMetric(result.redoRestore)}`)
+  console.log(`  fallback replace:    ${summarizeMetric(result.fallbackReplace)}`)
+  console.log(`  add board:           ${summarizeMetric(result.addBoard)}`)
+  console.log(`  remove board:        ${summarizeMetric(result.removeBoard)}`)
+  console.log(`  fallback/final-stroke raw ratio: ${(result.fallbackReplace.bytes / result.finalStrokeUpsert.bytes).toFixed(1)}x\n`)
 }

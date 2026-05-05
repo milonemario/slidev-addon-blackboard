@@ -41,11 +41,24 @@ import {
   saveBoardSet,
 } from './blackboardClientApi'
 import {
+  clearBlackboardPreviewElements,
   currentDrauuDrawing,
+  currentDrauuPreviewElement,
   loadDrauuDrawing,
   refreshEraserFragments,
   reindexDrauuElements,
+  upsertBlackboardPreviewElement,
 } from './blackboardDrauuAdapter'
+import {
+  boardsWithDrawingOperation,
+  clearPreviewOperation,
+  drawingOperationsFromElementDiff,
+  parsePreviewElement,
+  previewElementOperation,
+  replaceDrawingOperation,
+  snapshotDrawingElements,
+  upsertElementOperation,
+} from './blackboardDrawingSync'
 import { eraserIntersectingExhibits } from './blackboardEraserGeometry'
 import {
   blackboardStoragePrefix,
@@ -107,7 +120,10 @@ const buildAppendixOptions = initialState.build || {
 }
 const blackboardDrawingInputTypes: NonNullable<DrauuOptions['acceptsInputTypes']> = ['mouse', 'pen']
 const noBlackboardInputTypes: NonNullable<DrauuOptions['acceptsInputTypes']> = []
-const drawingSyncInterval = 33
+const drawingSyncInterval = 100
+const previewSyncInterval = 33
+const drawingSelfHealInterval = 3000
+const drawingSelfHealBurstSize = 25
 
 function alertAction(message: string) {
   if (typeof window !== 'undefined')
@@ -229,12 +245,22 @@ function createBlackboard() {
     let lastAppliedStateId = serverState.value?.stateId || ''
     let lastSentOpenId = ''
     let lastSentStateId = ''
+    let syncSeq = 0
+    const lastAppliedSyncSeq = new Map<string, number>()
     let openSyncCleanupTimer: ReturnType<typeof setTimeout> | undefined
     let persistTimer: ReturnType<typeof setTimeout> | undefined
     let guidePersistTimer: ReturnType<typeof setTimeout> | undefined
     let drawingSyncTimer: ReturnType<typeof setTimeout> | undefined
+    let previewSyncTimer: ReturnType<typeof setTimeout> | undefined
+    let drawingSelfHealTimer: ReturnType<typeof setTimeout> | undefined
     let pendingDrawingSync: string | undefined
+    let pendingEraseSnapshot: Map<string, Element> | undefined
+    let drawingDeltaCount = 0
     let lastDrawingSyncSentAt = 0
+    let lastPreviewSyncSentAt = 0
+    let activePreviewId: string | undefined
+    let activePreviewSent = false
+    let suppressNextDrawingReplaceSync = false
     let releaseShortcutLock: (() => void) | undefined
     let keydownHandler: ((event: KeyboardEvent) => void) | undefined
 
@@ -449,7 +475,34 @@ function createBlackboard() {
     patchServerBlackboardRef(serverState, patch)
   }
 
-  function sendDrawingSyncState(drawing: string) {
+  function nextSyncMetadata() {
+    syncSeq += 1
+    return {
+      syncClientId: clientId,
+      syncSeq,
+    }
+  }
+
+  function clearScheduledDrawingSync() {
+    if (drawingSyncTimer)
+      clearTimeout(drawingSyncTimer)
+    drawingSyncTimer = undefined
+    pendingDrawingSync = undefined
+  }
+
+  function clearScheduledPreviewSync() {
+    if (previewSyncTimer)
+      clearTimeout(previewSyncTimer)
+    previewSyncTimer = undefined
+  }
+
+  function clearScheduledSelfHeal() {
+    if (drawingSelfHealTimer)
+      clearTimeout(drawingSelfHealTimer)
+    drawingSelfHealTimer = undefined
+  }
+
+  function sendDrawingOperation(operation: NonNullable<BlackboardSyncState['drawingOperation']>, nextActiveBoardId = activeBoardId.value) {
     if (!shouldSendSyncCommand())
       return
 
@@ -458,15 +511,79 @@ function createBlackboard() {
     lastSentStateId = id
     lastDrawingSyncSentAt = now
     patchServerBlackboard({
-      activeBoardId: activeBoardId.value,
-      activeDrawing: drawing,
+      activeBoardId: nextActiveBoardId,
+      activeDrawing: undefined,
       boardOperation: undefined,
       boardTheme: boardTheme.value,
       boards: undefined,
+      drawingOperation: operation,
       stateId: id,
       stateSource: syncType.value,
       stateTime: now,
+      ...nextSyncMetadata(),
     })
+  }
+
+  function sendReplaceDrawingSyncState(drawing: string) {
+    drawingDeltaCount = 0
+    clearScheduledSelfHeal()
+    sendDrawingOperation(replaceDrawingOperation(drawing))
+  }
+
+  function createPreviewId() {
+    return `${clientId}-preview-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  }
+
+  function clearActivePreview(sendRemoteClear = false) {
+    clearScheduledPreviewSync()
+    const previewId = activePreviewId
+    const shouldSendClear = sendRemoteClear && activePreviewSent && previewId
+    activePreviewId = undefined
+    activePreviewSent = false
+
+    if (shouldSendClear)
+      sendDrawingOperation(clearPreviewOperation(previewId))
+  }
+
+  function sendPreviewSync() {
+    previewSyncTimer = undefined
+    if (editMode.value !== 'live' || drawingMode.value === 'eraseLine' || !drauu.el || !shouldSendSyncCommand())
+      return
+
+    const element = currentDrauuPreviewElement(drauu)
+    if (!element)
+      return
+
+    if (!activePreviewId)
+      activePreviewId = createPreviewId()
+
+    const index = Math.max(0, Array.from(drauu.el.children).indexOf(element))
+    sendDrawingOperation(previewElementOperation(element, index, activePreviewId))
+    activePreviewSent = true
+    lastPreviewSyncSentAt = Date.now()
+  }
+
+  function schedulePreviewSync() {
+    if (editMode.value !== 'live' || drawingMode.value === 'eraseLine' || !isDrawing.value)
+      return
+
+    const elapsed = Date.now() - lastPreviewSyncSentAt
+    if (elapsed >= previewSyncInterval) {
+      sendPreviewSync()
+      return
+    }
+
+    if (!previewSyncTimer) {
+      previewSyncTimer = setTimeout(() => {
+        sendPreviewSync()
+      }, Math.max(0, previewSyncInterval - elapsed))
+    }
+  }
+
+  function activeLiveDrawingForSync() {
+    return liveBoardsWithCurrentDrawing().find(board => board.id === activeBoardId.value)?.drawing
+      || activeLiveBoard.value?.drawing
+      || ''
   }
 
   function flushDrawingSyncState() {
@@ -477,7 +594,7 @@ function createBlackboard() {
     const drawing = pendingDrawingSync
     pendingDrawingSync = undefined
     if (drawing != null)
-      sendDrawingSyncState(drawing)
+      sendReplaceDrawingSyncState(drawing)
   }
 
   function scheduleDrawingSyncState(drawing: string) {
@@ -498,14 +615,37 @@ function createBlackboard() {
     }
   }
 
+  function scheduleSelfHealingDrawingSync() {
+    drawingDeltaCount += 1
+    if (drawingDeltaCount >= drawingSelfHealBurstSize) {
+      sendReplaceDrawingSyncState(activeLiveDrawingForSync())
+      return
+    }
+
+    if (!drawingSelfHealTimer) {
+      drawingSelfHealTimer = setTimeout(() => {
+        drawingSelfHealTimer = undefined
+        sendReplaceDrawingSyncState(activeLiveDrawingForSync())
+      }, drawingSelfHealInterval)
+    }
+  }
+
+  function sendElementUpsert(element: Element, index: number, previewId?: string) {
+    if (editMode.value !== 'live')
+      return
+
+    sendDrawingOperation(upsertElementOperation(element, index, previewId))
+    scheduleSelfHealingDrawingSync()
+  }
+
     function syncBoardState() {
       if (!shouldSendSyncCommand())
         return
 
-      if (drawingSyncTimer)
-        clearTimeout(drawingSyncTimer)
-      drawingSyncTimer = undefined
-      pendingDrawingSync = undefined
+      clearScheduledDrawingSync()
+      clearScheduledPreviewSync()
+      clearScheduledSelfHeal()
+      drawingDeltaCount = 0
       const id = createSyncId(clientId, 'state')
       const currentBoards = liveBoardsWithCurrentDrawing()
       lastSentStateId = id
@@ -515,9 +655,11 @@ function createBlackboard() {
         boardOperation: undefined,
         boardTheme: boardTheme.value,
         boards: cloneBoards(currentBoards),
+        drawingOperation: undefined,
         stateId: id,
       stateSource: syncType.value,
       stateTime: Date.now(),
+      ...nextSyncMetadata(),
     })
   }
 
@@ -550,10 +692,8 @@ function createBlackboard() {
       if (!operation || !shouldSendSyncCommand())
         return
 
-      if (drawingSyncTimer)
-        clearTimeout(drawingSyncTimer)
-      drawingSyncTimer = undefined
-      pendingDrawingSync = undefined
+      clearScheduledDrawingSync()
+      clearScheduledPreviewSync()
 
       const active = boards.value.find(board => board.id === nextActiveBoardId) || boards.value[0]
       const id = createSyncId(clientId, 'state')
@@ -564,9 +704,11 @@ function createBlackboard() {
         boardOperation: operation,
         boardTheme: boardTheme.value,
         boards: undefined,
+        drawingOperation: undefined,
         stateId: id,
         stateSource: syncType.value,
         stateTime: Date.now(),
+        ...nextSyncMetadata(),
       })
     }
 
@@ -623,8 +765,16 @@ function createBlackboard() {
         activeBoardIdForMode(mode),
         { persist: true },
       )
-      if (mode === 'live')
+      if (mode === 'live' && suppressNextDrawingReplaceSync) {
+        suppressNextDrawingReplaceSync = false
+        clearScheduledDrawingSync()
+      }
+      else if (mode === 'live' && isDrawing.value && drawingMode.value !== 'eraseLine') {
+        schedulePreviewSync()
+      }
+      else if (mode === 'live') {
         scheduleDrawingSyncState(drawing)
+      }
     }
 
     function boardsWithCurrentDrawing(mode = editMode.value) {
@@ -658,6 +808,7 @@ function createBlackboard() {
 
     isLoading = true
     loadDrauuDrawing(drauu, svg)
+    clearActivePreview(false)
     refreshEraserFragments(drauu, drawingMode.value)
     updateState()
     isLoading = false
@@ -667,27 +818,53 @@ function createBlackboard() {
     loadDrawing(drawingData.value)
   }
 
-    function save() {
-      updateState()
-      if (isLoading)
-        return
+  function save() {
+    updateState()
+    if (isLoading)
+      return
 
     updateActiveBoardDrawing(currentDrauuDrawing(drauu))
   }
 
-  function clear() {
-    loadDrawing('')
-    updateActiveBoardDrawing('')
-  }
+  function handleDrauuChanged() {
+    if (isDrawing.value && editMode.value === 'live' && drawingMode.value !== 'eraseLine') {
+      updateState()
+      schedulePreviewSync()
+      return
+    }
 
-  function undo() {
-    drauu.undo()
     save()
   }
 
+  function clear() {
+    loadDrawing('')
+    if (editMode.value === 'live')
+      suppressNextDrawingReplaceSync = true
+    updateActiveBoardDrawing('')
+    if (editMode.value === 'live')
+      fallbackReplaceActiveDrawing()
+  }
+
+  function undo() {
+    const before = snapshotDrawingElements(drauu.el)
+    const changed = drauu.undo()
+    if (!changed)
+      return
+    suppressNextDrawingReplaceSync = true
+    save()
+    if (!syncDrawingElementDiff(before))
+      fallbackReplaceActiveDrawing()
+  }
+
     function redo() {
-      drauu.redo()
+      const before = snapshotDrawingElements(drauu.el)
+      const changed = drauu.redo()
+      if (!changed)
+        return
+      suppressNextDrawingReplaceSync = true
       save()
+      if (!syncDrawingElementDiff(before))
+        fallbackReplaceActiveDrawing()
     }
 
     function guideBoardForLiveBoard(liveBoard: BlackboardBoard | undefined, index: number) {
@@ -1236,10 +1413,31 @@ function createBlackboard() {
     pendingExhibit.value = undefined
   }
 
+  function syncDrawingElementDiff(before: Map<string, Element>) {
+    if (editMode.value !== 'live' || !drauu.el)
+      return false
+
+    const operations = drawingOperationsFromElementDiff(before, drauu.el)
+    if (!operations?.length)
+      return false
+
+    operations.forEach(operation => sendDrawingOperation(operation))
+    scheduleSelfHealingDrawingSync()
+    return true
+  }
+
+  function fallbackReplaceActiveDrawing() {
+    if (editMode.value !== 'live')
+      return
+
+    sendReplaceDrawingSyncState(currentDrauuDrawing(drauu))
+  }
+
   function eraseExhibitsBetweenPoints(start: BlackboardPoint, end: BlackboardPoint) {
     if (!drauu.mounted || drawingMode.value !== 'eraseLine' || !drauu.el)
       return false
 
+    const before = snapshotDrawingElements(drauu.el)
     const padding = Math.max(1.5, Number(brush.size || 1) * 0.45)
     const { erased, erasedLockedExhibits } = eraserIntersectingExhibits(drauu.el, start, end, padding)
 
@@ -1250,7 +1448,10 @@ function createBlackboard() {
     erased.forEach(element => element.remove())
     reindexDrauuElements(drauu)
     refreshEraserFragments(drauu, drawingMode.value)
+    suppressNextDrawingReplaceSync = true
     save()
+    if (!syncDrawingElementDiff(before))
+      fallbackReplaceActiveDrawing()
     return true
   }
 
@@ -1355,6 +1556,7 @@ function createBlackboard() {
         activeBoardId: activeBoardId.value,
         boardTheme: boardTheme.value,
         boards: cloneBoards(liveBoardsWithCurrentDrawing()),
+      drawingOperation: undefined,
       openId: id,
       openClientId: clientId,
       open,
@@ -1370,6 +1572,7 @@ function createBlackboard() {
       patch.stateId = stateId
       patch.stateSource = syncType.value
       patch.stateTime = Date.now()
+      Object.assign(patch, nextSyncMetadata())
     }
 
     patchServerBlackboard(patch)
@@ -1430,10 +1633,55 @@ function createBlackboard() {
     return true
   }
 
+  function applySyncedDrawingOperation(state: BlackboardSyncState) {
+    const operation = state.drawingOperation
+    const targetId = state.activeBoardId
+    if (!operation || !targetId)
+      return false
+
+    if (operation.type === 'previewElement') {
+      if (targetId !== activeBoardId.value || editMode.value !== 'live' || !drauu.mounted || !drauu.el)
+        return true
+
+      const element = parsePreviewElement(operation.elementSvg, operation.previewId)
+      if (!element)
+        return true
+
+      upsertBlackboardPreviewElement(drauu.el, element, operation.index)
+      updateState()
+      return true
+    }
+
+    if (operation.type === 'clearPreview') {
+      if (targetId === activeBoardId.value && editMode.value === 'live' && drauu.el) {
+        clearBlackboardPreviewElements(drauu.el, operation.previewId)
+        updateState()
+      }
+      return true
+    }
+
+    if (targetId === activeBoardId.value && editMode.value === 'live' && drauu.el) {
+      if (operation.type === 'upsertElement' && operation.previewId)
+        clearBlackboardPreviewElements(drauu.el, operation.previewId)
+      else
+        clearBlackboardPreviewElements(drauu.el)
+    }
+
+    const result = boardsWithDrawingOperation(boards.value, targetId, operation)
+    if (!result.applied)
+      return false
+
+    commitLiveBoards(result.boards, targetId, { load: editMode.value === 'live' })
+    return true
+  }
+
   function applySyncedBoards(state: BlackboardSyncState) {
     applySyncedBoardTheme(state)
 
       if (applySyncedBoardOperation(state))
+        return
+
+      if (applySyncedDrawingOperation(state))
         return
 
       if (!state.boards?.length) {
@@ -1462,6 +1710,18 @@ function createBlackboard() {
     return isFreshBoardSyncCommandFromState(state, lastSentStateId, lastAppliedStateId, clientStartedAt)
   }
 
+  function isFreshSyncSequence(state: BlackboardSyncState) {
+    if (!state.syncClientId || typeof state.syncSeq !== 'number')
+      return true
+
+    return state.syncSeq > (lastAppliedSyncSeq.get(state.syncClientId) || 0)
+  }
+
+  function markSyncSequenceApplied(state: BlackboardSyncState) {
+    if (state.syncClientId && typeof state.syncSeq === 'number')
+      lastAppliedSyncSeq.set(state.syncClientId, state.syncSeq)
+  }
+
   function applySyncState(state: BlackboardSyncState | undefined) {
     if (!state || !shouldReceiveSyncCommand())
       return
@@ -1471,8 +1731,9 @@ function createBlackboard() {
       isOpen.value = state.open
     }
 
-    if (isFreshBoardSyncCommand(state)) {
+    if (isFreshBoardSyncCommand(state) && isFreshSyncSequence(state)) {
       lastAppliedStateId = state.stateId
+      markSyncSequenceApplied(state)
       applySyncedBoards(state)
     }
   }
@@ -1488,16 +1749,45 @@ function createBlackboard() {
 
     applySyncedBoardTheme(state)
 
-    if (isFreshBoardSyncCommand(state)) {
+    if (isFreshBoardSyncCommand(state) && isFreshSyncSequence(state)) {
       lastAppliedStateId = state.stateId
+      markSyncSequenceApplied(state)
       applySyncedBoards(state)
     }
   }
 
-  drauu.on('changed', save)
-  drauu.on('start', () => isDrawing.value = true)
+  drauu.on('changed', handleDrauuChanged)
+  drauu.on('committed', (node) => {
+    if (!node || editMode.value !== 'live' || !drauu.el)
+      return
+
+    const previewId = activePreviewId
+    const index = Math.max(0, Array.from(drauu.el.children).indexOf(node))
+    suppressNextDrawingReplaceSync = true
+    clearScheduledDrawingSync()
+    clearActivePreview(false)
+    sendElementUpsert(node, index, previewId)
+  })
+  drauu.on('start', () => {
+    isDrawing.value = true
+    activePreviewId = undefined
+    activePreviewSent = false
+    pendingEraseSnapshot = editMode.value === 'live' && drawingMode.value === 'eraseLine'
+      ? snapshotDrawingElements(drauu.el)
+      : undefined
+  })
   drauu.on('end', () => {
     isDrawing.value = false
+    if (pendingEraseSnapshot) {
+      clearActivePreview(false)
+      suppressNextDrawingReplaceSync = true
+      if (!syncDrawingElementDiff(pendingEraseSnapshot))
+        fallbackReplaceActiveDrawing()
+      pendingEraseSnapshot = undefined
+      clearScheduledDrawingSync()
+      return
+    }
+    clearActivePreview(true)
     flushDrawingSyncState()
   })
 
@@ -1607,11 +1897,20 @@ function createBlackboard() {
       clearTimeout(guidePersistTimer)
     if (drawingSyncTimer)
       clearTimeout(drawingSyncTimer)
+    if (previewSyncTimer)
+      clearTimeout(previewSyncTimer)
+    if (drawingSelfHealTimer)
+      clearTimeout(drawingSelfHealTimer)
     openSyncCleanupTimer = undefined
     persistTimer = undefined
     guidePersistTimer = undefined
     drawingSyncTimer = undefined
+    previewSyncTimer = undefined
+    drawingSelfHealTimer = undefined
     pendingDrawingSync = undefined
+    pendingEraseSnapshot = undefined
+    activePreviewId = undefined
+    activePreviewSent = false
 
     if (releaseShortcutLock) {
       releaseShortcutLock()

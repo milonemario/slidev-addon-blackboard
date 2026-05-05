@@ -14,18 +14,48 @@ export type BlackboardBoardSyncOperation =
     boardId: string
   }
 
+export type BlackboardDrawingSyncOperation =
+  | {
+    type: 'upsertElement'
+    elementId: string
+    elementSvg: string
+    index: number
+    previewId?: string
+  }
+  | {
+    type: 'removeElements'
+    elementIds: string[]
+  }
+  | {
+    type: 'replaceDrawing'
+    drawing: string
+  }
+  | {
+    type: 'previewElement'
+    previewId: string
+    elementSvg: string
+    index: number
+  }
+  | {
+    type: 'clearPreview'
+    previewId: string
+  }
+
 export interface BlackboardSyncState {
   activeBoardId?: string
   activeDrawing?: string
   boardOperation?: BlackboardBoardSyncOperation
   boardTheme?: BlackboardBoardTheme
   boards?: BlackboardBoard[]
+  drawingOperation?: BlackboardDrawingSyncOperation
   open?: boolean
   openClientId?: string
   openId?: string
   openSource?: SyncType
   openTime?: number
   stateId?: string
+  syncClientId?: string
+  syncSeq?: number
   stateSource?: SyncType
   stateTime?: number
 }
