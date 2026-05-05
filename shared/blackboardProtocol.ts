@@ -26,6 +26,7 @@ export interface BlackboardPersistedState {
   activeBoardId?: string
   boards: BlackboardBoard[]
   createdAt?: number
+  loadedBoardIds?: string[]
   name?: string
   savedAt?: number
   theme?: BlackboardBoardTheme
@@ -99,6 +100,8 @@ export interface BlackboardInitialState {
   guideActiveBoardId?: string
   guideActiveSetId?: string
   guideBoards?: BlackboardBoard[]
+  guideLoadedBoardIds?: string[]
+  loadedBoardIds?: string[]
   persist?: boolean
   theme?: BlackboardBoardTheme
 }

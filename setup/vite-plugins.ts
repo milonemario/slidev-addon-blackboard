@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import path from 'node:path'
+import { gzipSync } from 'node:zlib'
 import type { Plugin } from 'vite'
 import type { BlackboardBoardSetKind, BlackboardPersistedState } from '../shared/blackboardProtocol'
 import {
@@ -24,6 +26,7 @@ import {
 } from './blackboardConfig'
 import type { BlackboardExhibitSource } from './blackboardExhibits'
 import { listExhibits, loadExhibit, loadImageExhibitAsset, publicExhibitMetadata } from './blackboardExhibits'
+import { mergeUnloadedBoards, stateWithActiveBoardOnly, stateWithSingleBoard } from './blackboardLazyState'
 import {
   activateBoardSet,
   boardSetRootDir,
@@ -100,10 +103,18 @@ async function readBodyJson(req: IncomingMessage) {
 }
 
 function writeJson(res: ServerResponse, value: unknown) {
+  const body = JSON.stringify(value)
   res.statusCode = 200
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Content-Type', 'application/json')
-  res.end(JSON.stringify(value))
+  const request = (res as ServerResponse & { req?: IncomingMessage }).req
+  if (body.length > 1024 && /\bgzip\b/.test(String(request?.headers['accept-encoding'] || ''))) {
+    res.setHeader('Content-Encoding', 'gzip')
+    res.end(gzipSync(body))
+    return
+  }
+
+  res.end(body)
 }
 
 function writeError(res: ServerResponse, statusCode: number, message: string) {
@@ -147,15 +158,16 @@ function createBlackboardVitePlugin(options: BlackboardSetupOptions): Plugin {
 
       const state = await loadSeededPersistedState(persistDir, prefilledLiveDir, options)
       const guideSelection = await loadDefaultBoardSetSelection(guideDir, 'guide')
-      const guideState = guideSelection.state
+      const guideState = stateWithActiveBoardOnly(guideSelection.state)
       const exhibits = await listExhibits(exhibitSources)
+      const initialState = stateWithActiveBoardOnly(state)
       return `export default ${JSON.stringify({
-        activeBoardId: state.activeBoardId,
+        activeBoardId: initialState.activeBoardId,
         boardSets: {
           endpoint: BLACKBOARD_BOARD_SETS_ENDPOINT,
           resetEndpoint: BLACKBOARD_RESET_LIVE_ENDPOINT,
         },
-        boards: state.boards,
+        boards: initialState.boards,
         build: config.build,
         enabled: true,
         endpoint: BLACKBOARD_STATE_ENDPOINT,
@@ -170,6 +182,8 @@ function createBlackboardVitePlugin(options: BlackboardSetupOptions): Plugin {
         guideActiveBoardId: guideState.activeBoardId,
         guideActiveSetId: guideSelection.id,
         guideBoards: guideState.boards,
+        guideLoadedBoardIds: guideState.loadedBoardIds,
+        loadedBoardIds: initialState.loadedBoardIds,
         persist: !!persistDir,
         theme: normalizeBoardTheme(state.theme),
       })}`
@@ -228,7 +242,16 @@ function createBlackboardVitePlugin(options: BlackboardSetupOptions): Plugin {
             if (kind && id) {
               if (requestUrl.searchParams.get('activate') === 'true' && kind !== 'current-live' && isSafeBoardSetId(id))
                 await activateBoardSet(kind, id, guideDir, prefilledLiveDir, savedLiveRootDir)
-              writeJson(res, await loadBoardSetState(kind, id, persistDir, guideDir, prefilledLiveDir, savedLiveRootDir))
+              const state = await loadBoardSetState(kind, id, persistDir, guideDir, prefilledLiveDir, savedLiveRootDir)
+              const boardId = requestUrl.searchParams.get('boardId') || ''
+              writeJson(
+                res,
+                boardId
+                  ? stateWithSingleBoard(state, boardId)
+                  : requestUrl.searchParams.get('activeOnly') === 'true'
+                    ? stateWithActiveBoardOnly(state)
+                    : state,
+              )
             }
             else {
               writeJson(res, {
@@ -323,7 +346,9 @@ function createBlackboardVitePlugin(options: BlackboardSetupOptions): Plugin {
           try {
             const body = await readBodyJson(req) as BlackboardPersistedState & { id?: string, name?: string }
             const id = requestUrl.searchParams.get('id') || body.id || 'default'
-            const saved = await saveBoardSet('guide', guideDir, id, body.name, body, options)
+            const guideRoot = guideDir && isSafeBoardSetId(id) ? path.join(guideDir, id) : undefined
+            const state = await mergeUnloadedBoards(guideRoot, body)
+            const saved = await saveBoardSet('guide', guideDir, id, body.name, state, options)
             writeJson(res, saved?.state || await loadDefaultBoardSetSelection(guideDir, 'guide').then(selection => selection.state))
           }
           catch (error) {
@@ -338,7 +363,7 @@ function createBlackboardVitePlugin(options: BlackboardSetupOptions): Plugin {
 
         try {
           const body = await readBodyJson(req) as BlackboardPersistedState
-          await writePersistedState(persistDir, body, options)
+          await writePersistedState(persistDir, await mergeUnloadedBoards(persistDir, body), options)
           res.statusCode = 204
           res.end()
         }

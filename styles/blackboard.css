@@ -113,6 +113,40 @@
   pointer-events: none;
 }
 
+.slidev-blackboard__loading {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  background: color-mix(in srgb, var(--slidev-blackboard-page-bg) 22%, transparent);
+  color: var(--slidev-blackboard-fg-muted);
+  font-size: 0.9rem;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.slidev-blackboard__loading-spinner,
+.slidev-blackboard__board-loading-icon {
+  width: 1em;
+  height: 1em;
+  animation: slidev-blackboard-spin 0.85s linear infinite;
+}
+
+.slidev-blackboard__loading-spinner {
+  border: 2px solid var(--slidev-blackboard-control-border);
+  border-top-color: var(--slidev-blackboard-fg-strong);
+  border-radius: 999px;
+}
+
+@keyframes slidev-blackboard-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .slidev-blackboard__drawing [fill="#ffffff"],
 .slidev-blackboard__reference [fill="#ffffff"],
 .slidev-blackboard__placement [fill="#ffffff"],

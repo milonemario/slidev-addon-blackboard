@@ -40,10 +40,19 @@ export async function getJson<T>(url: string): Promise<T> {
   return await response.json() as T
 }
 
-export async function fetchBoardSet(endpoint: string, key: string, activate = false) {
+export async function fetchBoardSet(
+  endpoint: string,
+  key: string,
+  activate = false,
+  options: { activeOnly?: boolean, boardId?: string } = {},
+) {
   const params = new URLSearchParams({ key })
   if (activate)
     params.set('activate', 'true')
+  if (options.activeOnly)
+    params.set('activeOnly', 'true')
+  if (options.boardId)
+    params.set('boardId', options.boardId)
   return await getJson<BlackboardInitialState>(`${endpoint}?${params.toString()}`)
 }
 

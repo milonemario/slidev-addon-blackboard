@@ -6,9 +6,12 @@ import BlackboardExhibitPicker from './components/BlackboardExhibitPicker.vue'
 import { useBlackboard, type BlackboardPlacementRect, type BlackboardPoint } from './composables/useBlackboard'
 
 const {
+  activeBoardLoaded,
+  activeBoardLoading,
   blackboardsEnabled,
   boardThemeClass,
   canEdit,
+  canDrawOnActiveBoard,
   cancelExhibitPlacement,
   close,
   canvasHeight,
@@ -172,7 +175,7 @@ function cancelPlacement() {
 }
 
 function beginExhibitErase(event: PointerEvent) {
-  if (drawingMode.value !== 'eraseLine' || pendingExhibit.value || !canEdit.value || !isBlackboardEditPointer(event))
+  if (drawingMode.value !== 'eraseLine' || pendingExhibit.value || !canDrawOnActiveBoard.value || !isBlackboardEditPointer(event))
     return
 
   const point = boardPoint(event)
@@ -181,7 +184,7 @@ function beginExhibitErase(event: PointerEvent) {
 }
 
 function updateExhibitErase(event: PointerEvent) {
-  if (drawingMode.value !== 'eraseLine' || pendingExhibit.value || !canEdit.value || !erasePoint.value || !isBlackboardEditPointer(event))
+  if (drawingMode.value !== 'eraseLine' || pendingExhibit.value || !canDrawOnActiveBoard.value || !erasePoint.value || !isBlackboardEditPointer(event))
     return
 
   const point = boardPoint(event)
@@ -281,7 +284,7 @@ onBeforeUnmount(() => {
         />
 
         <div
-          v-if="pendingExhibit"
+          v-if="pendingExhibit && canDrawOnActiveBoard"
           class="slidev-blackboard__placement"
           @pointerdown="beginPlacementDrag"
           @pointermove="updatePlacementDrag"
@@ -304,6 +307,15 @@ onBeforeUnmount(() => {
             />
             <g :transform="placementPreviewTransform" v-html="pendingExhibit.svg" />
           </svg>
+        </div>
+
+        <div
+          v-if="!activeBoardLoaded"
+          class="slidev-blackboard__loading"
+          aria-live="polite"
+        >
+          <div v-if="activeBoardLoading" class="slidev-blackboard__loading-spinner" />
+          <span>{{ activeBoardLoading ? 'Loading blackboard' : 'Blackboard unavailable' }}</span>
         </div>
       </div>
 

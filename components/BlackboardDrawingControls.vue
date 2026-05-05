@@ -28,6 +28,7 @@ const {
   brush,
   brushColors,
   activeBoardIndex,
+  activeBoardLoading,
   activeGuideSetName,
   blackboardEditMode,
   boardCount,
@@ -348,7 +349,8 @@ onMounted(() => {
         </IconButton>
 
         <span class="slidev-blackboard__board-status">
-          {{ activeBoardIndex + 1 }}/{{ boardCount }}
+          <span v-if="activeBoardLoading" class="slidev-blackboard__board-loading-icon i-carbon:circle-dash" />
+          <span>{{ activeBoardIndex + 1 }}/{{ boardCount }}</span>
         </span>
 
         <IconButton title="Next blackboard" :class="{ disabled: !canGoNextBoard }" @click="nextBoard">

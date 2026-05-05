@@ -19,6 +19,7 @@ import {
   BLACKBOARD_GUIDES_ENDPOINT,
   BLACKBOARD_RESET_LIVE_ENDPOINT,
   BLACKBOARD_STATE_ENDPOINT,
+  boardSetKey,
   boardSetFallbackName,
   normalizeBlackboardExportOptions,
   normalizeBoardTheme,
@@ -67,6 +68,12 @@ import {
   storedRef,
   writeStoredValue,
 } from './blackboardStorage'
+import {
+  createBlackboardTiming,
+  createBoardLoadingTracker,
+  delay,
+  unloadedNeighborFirstIds,
+} from './blackboardLazyLoading'
 import type { BlackboardServerRef, BlackboardSyncState, SyncType } from './blackboardSync'
 import {
   createSyncId,
@@ -226,6 +233,7 @@ function createBlackboard() {
   const canClear = ref(false)
     const canRedo = ref(false)
     const canUndo = ref(false)
+    const boardLoadingVersion = ref(0)
     const exhibits = ref<BlackboardExhibit[]>(initialState.exhibits || [])
     const exportBlackboardSets = ref<BlackboardBoardSetSummary[]>([{
       boardCount: boards.value.length,
@@ -267,6 +275,17 @@ function createBlackboard() {
     const clientId = typeof window === 'undefined'
       ? 'server'
       : `${window.location.origin}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const timingEnabled = typeof window !== 'undefined'
+      && (
+        new URLSearchParams(window.location.search).has('blackboardTiming')
+        || window.localStorage.getItem(`${prefix}:timing`) === 'true'
+      )
+    const timing = createBlackboardTiming(timingEnabled)
+    const boardLoading = createBoardLoadingTracker(
+      initialState.loadedBoardIds || initialBoards.map(board => board.id),
+      initialState.guideLoadedBoardIds || initialGuideBoards.map(board => board.id),
+      boardLoadingVersion,
+    )
     const syncType = computed<SyncType>(() => isPresenter.value ? 'presenter' : 'viewer')
     const canEditGuides = computed(() => blackboardsEnabled && guidesEnabled && isPresenter.value && !isNotesViewer.value && !isPrintMode.value)
     const editMode = computed<BlackboardEditMode>(() => (
@@ -301,6 +320,13 @@ function createBlackboard() {
     const activeBoardIndex = computed(() => {
       return editMode.value === 'guide' ? activeGuideBoardIndex.value : activeLiveBoardIndex.value
     })
+    const activeBoardLoaded = computed(() => {
+      return boardLoading.isLoaded(editMode.value, activeBoard.value?.id)
+    })
+    const activeBoardLoading = computed(() => {
+      return boardLoading.isLoading(editMode.value, activeBoard.value?.id)
+    })
+    const canDrawOnActiveBoard = computed(() => canEdit.value && activeBoardLoaded.value)
     const boardCount = computed(() => editMode.value === 'guide' ? guideBoards.value.length : boards.value.length)
     const canGoPreviousBoard = computed(() => activeBoardIndex.value > 0)
     const canGoNextBoard = computed(() => activeBoardIndex.value < boardCount.value - 1)
@@ -352,7 +378,7 @@ function createBlackboard() {
     ))
     const canSaveGuides = computed(() => canEditGuides.value)
     const canSavePrefilledLiveBoards = computed(() => blackboardsEnabled && persistedBoardsEnabled && !isNotesViewer.value && !isPrintMode.value)
-    const canShowExhibits = computed(() => blackboardsEnabled && isOpen.value && canEdit.value && !isPrintMode.value && exhibits.value.length > 0)
+    const canShowExhibits = computed(() => blackboardsEnabled && isOpen.value && canDrawOnActiveBoard.value && !isPrintMode.value && exhibits.value.length > 0)
     const hasGuideBoards = computed(() => guidesEnabled && guideBoards.value.length > 0)
     const activeGuideSetName = computed(() => {
       const activeSet = exportBlackboardSets.value.find(set => set.kind === 'guide' && set.id === activeGuideSetId.value)
@@ -368,7 +394,7 @@ function createBlackboard() {
 
   const drauuOptions: DrauuOptions = reactive({
     brush,
-    acceptsInputTypes: computed(() => (blackboardsEnabled && isOpen.value && canEdit.value && !pendingExhibit.value) ? blackboardDrawingInputTypes : noBlackboardInputTypes),
+    acceptsInputTypes: computed(() => (blackboardsEnabled && isOpen.value && canDrawOnActiveBoard.value && !pendingExhibit.value) ? blackboardDrawingInputTypes : noBlackboardInputTypes),
   })
   const drauu = markRaw(createDrauu(drauuOptions))
   const isSyncedOpen = computed(() => blackboardsEnabled && isOpen.value)
@@ -386,6 +412,13 @@ function createBlackboard() {
   }
 
   function updateState() {
+    if (!activeBoardLoaded.value) {
+      canRedo.value = false
+      canUndo.value = false
+      canClear.value = false
+      return
+    }
+
     canRedo.value = drauu.canRedo()
     canUndo.value = drauu.canUndo()
     canClear.value = !!drauu.el?.children.length
@@ -412,20 +445,26 @@ function createBlackboard() {
       return mode === 'guide' ? activeGuideBoardId.value : activeBoardId.value
     }
 
-    function persistedState(nextBoards: BlackboardBoard[], nextActiveBoardId: string | undefined, includeTheme = false) {
+    function persistedState(
+      nextBoards: BlackboardBoard[],
+      nextActiveBoardId: string | undefined,
+      includeTheme = false,
+      loadedBoardIds?: Set<string>,
+    ) {
       return {
         activeBoardId: nextActiveBoardId,
         boards: cloneBoards(nextBoards),
+        ...(loadedBoardIds ? { loadedBoardIds: Array.from(loadedBoardIds) } : {}),
         ...(includeTheme ? { theme: boardTheme.value } : {}),
       }
     }
 
     function persistedLiveState(nextBoards = liveBoardsWithCurrentDrawing(), nextActiveBoardId = activeBoardId.value) {
-      return persistedState(nextBoards, nextActiveBoardId, true)
+      return persistedState(nextBoards, nextActiveBoardId, true, boardLoading.loadedIds('live'))
     }
 
     function persistedGuideState(nextBoards = guideBoardsWithCurrentDrawing(), nextActiveBoardId = activeGuideBoardId.value) {
-      return persistedState(nextBoards, nextActiveBoardId)
+      return persistedState(nextBoards, nextActiveBoardId, false, boardLoading.loadedIds('guide'))
     }
 
     function persistLiveBoardState() {
@@ -638,6 +677,28 @@ function createBlackboard() {
     scheduleSelfHealingDrawingSync()
   }
 
+  function syncActiveBoardSelection(nextActiveBoardId: string, drawing = activeLiveBoard.value?.drawing || '') {
+    if (!shouldSendSyncCommand())
+      return
+
+    clearScheduledDrawingSync()
+    clearScheduledPreviewSync()
+    const id = createSyncId(clientId, 'state')
+    lastSentStateId = id
+    patchServerBlackboard({
+      activeBoardId: nextActiveBoardId,
+      activeDrawing: drawing,
+      boardOperation: undefined,
+      boardTheme: boardTheme.value,
+      boards: undefined,
+      drawingOperation: undefined,
+      stateId: id,
+      stateSource: syncType.value,
+      stateTime: Date.now(),
+      ...nextSyncMetadata(),
+    })
+  }
+
     function syncBoardState() {
       if (!shouldSendSyncCommand())
         return
@@ -807,7 +868,9 @@ function createBlackboard() {
     }
 
     isLoading = true
+    const startedAt = performance.now()
     loadDrauuDrawing(drauu, svg)
+    timing.log(`drauu.load ${editMode.value} board ${activeBoard.value?.id || 'unknown'}`, startedAt)
     clearActivePreview(false)
     refreshEraserFragments(drauu, drawingMode.value)
     updateState()
@@ -820,7 +883,7 @@ function createBlackboard() {
 
   function save() {
     updateState()
-    if (isLoading)
+    if (isLoading || !activeBoardLoaded.value)
       return
 
     updateActiveBoardDrawing(currentDrauuDrawing(drauu))
@@ -837,6 +900,9 @@ function createBlackboard() {
   }
 
   function clear() {
+    if (!activeBoardLoaded.value)
+      return
+
     loadDrawing('')
     if (editMode.value === 'live')
       suppressNextDrawingReplaceSync = true
@@ -846,6 +912,9 @@ function createBlackboard() {
   }
 
   function undo() {
+    if (!activeBoardLoaded.value)
+      return
+
     const before = snapshotDrawingElements(drauu.el)
     const changed = drauu.undo()
     if (!changed)
@@ -857,6 +926,9 @@ function createBlackboard() {
   }
 
     function redo() {
+      if (!activeBoardLoaded.value)
+        return
+
       const before = snapshotDrawingElements(drauu.el)
       const changed = drauu.redo()
       if (!changed)
@@ -946,17 +1018,79 @@ function createBlackboard() {
       return await fetchBoardSet(boardSetsEndpoint, key, activate)
     }
 
+    function boardSetKeyForMode(mode: BlackboardEditMode) {
+      return mode === 'guide'
+        ? boardSetKey('guide', activeGuideSetId.value || 'default')
+        : 'current'
+    }
+
+    async function loadBoardDrawingForMode(
+      mode: BlackboardEditMode,
+      boardId: string,
+      options: { load?: boolean, sync?: boolean } = {},
+    ) {
+      if (!boardId || boardLoading.isLoaded(mode, boardId))
+        return
+
+      if (boardLoading.isLoading(mode, boardId) && !options.load)
+        return
+
+      boardLoading.markLoading(mode, boardId, true)
+      try {
+        const state = await timing.timed(`fetch ${mode} board ${boardId}`, () =>
+          fetchBoardSet(boardSetsEndpoint, boardSetKeyForMode(mode), false, { boardId }),
+        )
+        const loadedBoard = state.boards?.find(board => board.id === boardId)
+        if (!loadedBoard)
+          return
+
+        boardLoading.markLoaded(mode, [boardId])
+        const nextBoards = boardsForMode(mode).map(board => board.id === boardId
+          ? { ...board, drawing: loadedBoard.drawing, updatedAt: loadedBoard.updatedAt }
+          : board)
+        commitBoardsForMode(mode, nextBoards, activeBoardIdForMode(mode), { load: options.load, persist: false })
+        if (mode === 'live' && options.sync)
+          syncActiveBoardSelection(boardId, loadedBoard.drawing)
+      }
+      catch (error) {
+        console.warn('[blackboard] Failed to load blackboard drawing', error)
+      }
+      finally {
+        boardLoading.markLoading(mode, boardId, false)
+      }
+    }
+
+    function preloadBoardDrawings(mode: BlackboardEditMode, activeId = activeBoardIdForMode(mode)) {
+      const ids = unloadedNeighborFirstIds(boardsForMode(mode), activeId, id => boardLoading.isLoaded(mode, id))
+
+      void (async () => {
+        for (const id of ids) {
+          await loadBoardDrawingForMode(mode, id)
+          await delay(20)
+        }
+      })()
+    }
+
+    async function loadAllBoardDrawingsForMode(mode: BlackboardEditMode) {
+      for (const board of boardsForMode(mode))
+        await loadBoardDrawingForMode(mode, board.id)
+    }
+
     async function refreshPersistedBoardsFromServer() {
       if (!blackboardsEnabled || typeof window === 'undefined' || isNotesViewer.value || isPrintMode.value)
         return
 
+      const startedAt = performance.now()
       try {
-        const response = await fetchBoardSets(boardSetsEndpoint)
+        const response = await timing.timed('fetch board-set list', () => fetchBoardSets(boardSetsEndpoint))
         exportBlackboardSets.value = response.sets || []
 
         if (persistedBoardsEnabled) {
-          const liveState = await fetchBoardSet(boardSetsEndpoint, 'current')
+          const liveState = await timing.timed('fetch current active board', () =>
+            fetchBoardSet(boardSetsEndpoint, 'current', false, { activeOnly: true }),
+          )
           const nextLiveBoards = cloneBoards(liveState.boards)
+          boardLoading.markLoaded('live', liveState.loadedBoardIds || [])
           if (liveState.theme)
             boardTheme.value = normalizeBoardTheme(liveState.theme)
           const aligned = guidesEnabled && nextLiveBoards.length
@@ -970,10 +1104,13 @@ function createBlackboard() {
         if (guidesEnabled) {
           const activeGuideSet = exportBlackboardSets.value.find(set => set.kind === 'guide' && set.active)
           if (activeGuideSet) {
-            const guideState = await fetchBoardSet(boardSetsEndpoint, activeGuideSet.key)
+            const guideState = await timing.timed('fetch active guide board', () =>
+              fetchBoardSet(boardSetsEndpoint, activeGuideSet.key, false, { activeOnly: true }),
+            )
             const nextGuideBoards = cloneBoards(guideState.boards)
             if (nextGuideBoards.length) {
               activeGuideSetId.value = activeGuideSet.id
+              boardLoading.markLoaded('guide', guideState.loadedBoardIds || [])
               const aligned = alignBoardPairs(boards.value, nextGuideBoards)
               commitGuideBoards(aligned.guideBoards, guideState.activeBoardId, { load: editMode.value === 'guide', persist: false })
               commitLiveBoards(aligned.liveBoards, activeBoardId.value, { persist: false, sync: true })
@@ -990,9 +1127,15 @@ function createBlackboard() {
         if (!exportBlackboardSets.value.some(set => set.key === exportBlackboardSetId.value))
           exportBlackboardSetId.value = 'current'
         await loadExportBlackboardSet(exportBlackboardSetId.value)
+        preloadBoardDrawings('live', activeBoardId.value)
+        if (guidesEnabled)
+          preloadBoardDrawings('guide', activeGuideBoardId.value)
       }
       catch (error) {
         console.warn('[blackboard] Failed to refresh persisted blackboards', error)
+      }
+      finally {
+        timing.log('refresh persisted blackboards', startedAt)
       }
     }
 
@@ -1086,6 +1229,7 @@ function createBlackboard() {
         return undefined
 
       save()
+      await loadAllBoardDrawingsForMode(editMode.value)
       const state = editMode.value === 'guide'
         ? persistedGuideState()
         : persistedLiveState()
@@ -1261,6 +1405,8 @@ function createBlackboard() {
       const insertIndex = Math.max(0, Math.min(index, Math.max(liveBoards.length, guides.length)))
       const guide = createBoard(insertIndex + 1)
       const liveBoard = createBoard(insertIndex + 1, '', guidesEnabled ? guide.id : undefined)
+      boardLoading.markLoaded('live', [liveBoard.id])
+      boardLoading.markLoaded('guide', [guide.id])
       const nextLiveBoards = [
         ...liveBoards.slice(0, insertIndex),
         liveBoard,
@@ -1333,6 +1479,10 @@ function createBlackboard() {
       if (guidesEnabled && (guideIndex >= 0 || guideBoards.value.length))
         commitGuideBoards(nextGuideBoards, nextActiveGuideBoardId, { load: mode === 'guide', persist: true })
       if (liveIndex >= 0 || boards.value.length) {
+        if (liveBoard)
+          boardLoading.remove('live', liveBoard.id)
+        if (guideBoard)
+          boardLoading.remove('guide', guideBoard.id)
         commitLiveBoards(nextLiveBoards, nextActiveLiveBoardId, { load: mode === 'live', persist: true })
         if (liveBoard) {
           syncLiveBoardOperation({
@@ -1344,11 +1494,25 @@ function createBlackboard() {
     }
 
     function selectBoard(id: string) {
+      const startedAt = performance.now()
       const mode = editMode.value
       if (id === activeBoard.value?.id || !boardsForMode(mode).some(board => board.id === id))
         return
 
-      commitBoardsForMode(mode, boardsWithCurrentDrawing(mode), id, { load: true, persist: true, sync: mode === 'live' })
+      const nextBoards = boardsWithCurrentDrawing(mode)
+      const isLoaded = boardLoading.isLoaded(mode, id)
+      commitBoardsForMode(mode, nextBoards, id, { load: true, persist: true })
+      if (mode === 'live') {
+        if (isLoaded)
+          syncActiveBoardSelection(id, nextBoards.find(board => board.id === id)?.drawing || '')
+        else
+          void loadBoardDrawingForMode(mode, id, { load: true, sync: true })
+      }
+      else if (!isLoaded) {
+        void loadBoardDrawingForMode(mode, id, { load: true })
+      }
+      preloadBoardDrawings(mode, id)
+      timing.log(`select ${mode} board ${id}${isLoaded ? '' : ' (lazy)'}`, startedAt)
     }
 
     function previousBoard() {
@@ -1434,7 +1598,7 @@ function createBlackboard() {
   }
 
   function eraseExhibitsBetweenPoints(start: BlackboardPoint, end: BlackboardPoint) {
-    if (!drauu.mounted || drawingMode.value !== 'eraseLine' || !drauu.el)
+    if (!activeBoardLoaded.value || !drauu.mounted || drawingMode.value !== 'eraseLine' || !drauu.el)
       return false
 
     const before = snapshotDrawingElements(drauu.el)
@@ -1456,7 +1620,7 @@ function createBlackboard() {
   }
 
   function insertExhibit(payload: BlackboardRenderedExhibit, rect: BlackboardPlacementRect) {
-    if (!activeBoard.value || payload.width <= 0 || payload.height <= 0)
+    if (!activeBoardLoaded.value || !activeBoard.value || payload.width <= 0 || payload.height <= 0)
       return
 
     const placementWidth = Math.abs(rect.width)
@@ -1688,6 +1852,7 @@ function createBlackboard() {
         if (typeof state.activeDrawing !== 'string' || !state.activeBoardId)
           return
 
+        boardLoading.markLoaded('live', [state.activeBoardId])
         const nextBoards = boards.value.map(board => board.id === state.activeBoardId
           ? { ...board, drawing: state.activeDrawing || '', updatedAt: Date.now() }
           : board)
@@ -1699,6 +1864,7 @@ function createBlackboard() {
         return
       }
 
+      boardLoading.markLoaded('live', state.boards.map(board => board.id))
       commitLiveBoards(state.boards, state.activeBoardId, { load: true })
     }
 
@@ -1937,6 +2103,8 @@ function createBlackboard() {
       activeBoard,
       activeBoardId,
       activeBoardIndex,
+      activeBoardLoaded,
+      activeBoardLoading,
       activeGuideBoard,
       activeGuideBoardId,
       activeGuideSetName,
@@ -1954,6 +2122,7 @@ function createBlackboard() {
       canClear,
       canEdit,
       canEditGuides,
+      canDrawOnActiveBoard,
       canExportBlackboards,
       canGoNextBoard,
       canGoPreviousBoard,
